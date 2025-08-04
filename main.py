@@ -7,70 +7,100 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# Helper function to extract dynamic features
-def extract_features(data):
-    timestamp = pd.to_datetime(data["timestamp"])
-    timestamp_numeric = timestamp.timestamp()
-    hour = timestamp.hour
-    dayofweek = timestamp.dayofweek
-
-    # Assume no prior change for real-time data (or it could come dynamically)
-    soil_moisture_change = 0
-    watering_event = 1 if soil_moisture_change > 10 else 0
-
-    # Ensure consistent feature order
-    feature_names = ["temperature", "humidity", "timestamp_numeric", 
-                     "soil_moisture_change", "hour", "dayofweek", "watering_event"]
-
-    # Return a DataFrame with correct feature names
-    features = pd.DataFrame([[data["temperature"], data["humidity"], timestamp_numeric, 
-                              soil_moisture_change, hour, dayofweek, watering_event]],
-                            columns=feature_names)
-
-    return features
 
 # Function to dynamically load model and scaler for the specific plant
-def load_model_and_scaler(plant_name):
-    model_path = os.path.join("model", plant_name, "soil_moisture_model.pkl")
-    scaler_path = os.path.join("model", plant_name, "soil_scaler.pkl")
+def load_model_components(plant_name):
+    model_path = os.path.join("model", plant_name, "best_soil_substitute_model.pkl")
+    scaler_path = os.path.join("model", plant_name, "best_soil_substitute_scaler.pkl")
+    feature_info_path = os.path.join("model", plant_name, "model_feature_info.pkl")
 
-    if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-        raise FileNotFoundError(f"Model or scaler not found for plant: {plant_name}")
+    if not all(os.path.exists(p) for p in [model_path, scaler_path, feature_info_path]):
+        raise FileNotFoundError(f"Missing model components for plant: {plant_name}")
 
-    model = joblib.load(model_path)
+    model = joblib.load(model_path)  # Added this line
     scaler = joblib.load(scaler_path)
-    return model, scaler
+    feature_info = joblib.load(feature_info_path)
+    
+    # Return the loaded components
+    return model, scaler, feature_info['feature_columns']
+
+def preprocess_input(data, feature_columns):
+    timestamp = pd.to_datetime(data["timestamp"])
+    hour = timestamp.hour
+    day_of_week = timestamp.dayofweek
+    month = timestamp.month
+    day_of_year = timestamp.dayofyear
+
+    # Cyclical encoding
+    hour_sin = np.sin(2 * np.pi * hour / 24)
+    hour_cos = np.cos(2 * np.pi * hour / 24)
+    day_sin = np.sin(2 * np.pi * day_of_week / 7)
+    day_cos = np.cos(2 * np.pi * day_of_week / 7)
+
+    # Convert string inputs to float
+    temperature = float(data["temperature"])
+    humidity = float(data["humidity"])
+
+    temp_humidity_interaction = temperature * humidity
+    temp_squared = temperature ** 2
+    humidity_squared = humidity ** 2
+
+    # For real-time prediction, use provided values or training averages as fallbacks
+    # Ideally, you should maintain a sliding window of recent readings
+    temp_rolling_3 = float(data.get('temp_rolling_3', temperature))
+    humidity_rolling_3 = float(data.get('humidity_rolling_3', humidity))
+    temp_rolling_24 = float(data.get('temp_rolling_24', temperature))
+    humidity_rolling_24 = float(data.get('humidity_rolling_24', humidity))
+    temp_lag_1 = float(data.get('temp_lag_1', temperature))
+    humidity_lag_1 = float(data.get('humidity_lag_1', humidity))
+
+
+    # Assemble input dictionary
+    input_dict = {
+        'humidity': humidity,
+        'temperature': temperature,
+        'hour_sin': hour_sin,
+        'hour_cos': hour_cos,
+        'day_sin': day_sin,
+        'day_cos': day_cos,
+        'month': month,
+        'day_of_year': day_of_year,
+        'temp_humidity_interaction': temp_humidity_interaction,
+        'temp_squared': temp_squared,
+        'humidity_squared': humidity_squared,
+        'temp_rolling_3': temp_rolling_3,
+        'humidity_rolling_3': humidity_rolling_3,
+        'temp_rolling_24': temp_rolling_24,
+        'humidity_rolling_24': humidity_rolling_24,
+        'temp_lag_1': temp_lag_1,
+        'humidity_lag_1': humidity_lag_1
+    }
+
+    # Ensure correct feature order
+    feature_values = [input_dict[feat] for feat in feature_columns]
+    return pd.DataFrame([feature_values], columns=feature_columns)
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.json
 
-        # Input validation
-        if "plant_name" not in data or "temperature" not in data or "humidity" not in data or "timestamp" not in data:
-            return jsonify({"error": "Missing plant_name, temperature, humidity, or timestamp"}), 400
+        if not all(k in data for k in ["plant_name", "temperature", "humidity", "timestamp"]):
+            return jsonify({"error": "Missing required keys"}), 400
 
         plant_name = data["plant_name"]
+        model, scaler, feature_columns = load_model_components(plant_name)
 
-        # Load model and scaler for the specific plant
-        model, scaler = load_model_and_scaler(plant_name)
-
-        # Extract features and maintain feature names
-        features = extract_features(data)
-
-        # Scale input using the fitted scaler
+        features = preprocess_input(data, feature_columns)
         features_scaled = scaler.transform(features)
-
-        # Predict soil moisture using the Random Forest model
-        predicted_scaled = model.predict(features_scaled)[0]
-
-        # Inverse transform to get the original soil moisture
-        original_features = np.zeros((1, 7))  # Placeholder array
-        original_features[0, -1] = predicted_scaled  # Set predicted value
-        predicted_soil_moisture = scaler.inverse_transform(original_features)[0][-1]
+        
+        # Convert back to DataFrame with proper column names to avoid warning
+        features_scaled_df = pd.DataFrame(features_scaled, columns=feature_columns)
+        
+        prediction = model.predict(features_scaled_df)[0]
 
         return jsonify({
-            "predicted_soil_moisture": round(float(predicted_soil_moisture), 2),
+            "predicted_soil_moisture": round(float(prediction), 2),
             "timestamp": data["timestamp"]
         })
 
@@ -80,4 +110,4 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=8080)
