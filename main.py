@@ -887,4 +887,4 @@ if __name__ == "__main__":
     os.makedirs(MODEL_BASE_DIR, exist_ok=True)
     
     # Run the Flask app
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
